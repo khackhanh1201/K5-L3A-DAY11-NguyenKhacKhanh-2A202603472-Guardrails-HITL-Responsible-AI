@@ -37,13 +37,22 @@ class RateLimitPlugin(base_plugin.BasePlugin):
         now = time.time()
         window = self.user_windows[user_id]
 
-        # TODO: Implement sliding window:
-        # 1. Pop timestamps older than (now - window_seconds) from the left
-        # 2. If len(window) >= max_requests:
-        #       wait = window_seconds - (now - window[0])
-        #       self.blocked_count += 1
-        #       return self._block_response(
-        #           f"Rate limit exceeded. Try again in {wait:.0f}s."
-        #       )
-        # 3. Else: append now, return None
-        raise NotImplementedError("Implement RateLimitPlugin.on_user_message_callback")
+        # 1. Drop timestamps that fell out of the sliding window
+        while window and window[0] <= now - self.window_seconds:
+            window.popleft()
+
+        # 2. Over quota -> block without calling the LLM
+        if len(window) >= self.max_requests:
+            wait = self.window_seconds - (now - window[0])
+            self.blocked_count += 1
+            return self._block_response(
+                f"[RATE_LIMITED] Rate limit exceeded. Try again in {wait:.0f}s."
+            )
+
+        # 3. Allow and record
+        window.append(now)
+        return None
+
+    def reset(self):
+        """Clear all per-user windows (used between test groups)."""
+        self.user_windows.clear()

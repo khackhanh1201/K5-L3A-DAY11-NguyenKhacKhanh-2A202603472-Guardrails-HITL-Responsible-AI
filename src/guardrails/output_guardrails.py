@@ -39,18 +39,19 @@ def content_filter(response: str) -> dict:
     issues = []
     redacted = response
 
-    # PII patterns to check
+    # Order matters: secrets first, then longer digit runs (CCCD) before phone.
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        "api_key": r"\bsk-[A-Za-z0-9_-]{6,}",
+        "password": r"\b(?:password|passwd|pwd|mật khẩu|mat khau)\b\s*(?:is|là|la|:|=)\s*[\"'`]?[^\s\"'`,.;]+",
+        "known_secret": r"admin123|sk-vinbank-secret-2024|db\.vinbank\.internal(?::\d+)?",
+        "internal_host": r"\b[\w-]+(?:\.[\w-]+)*\.internal(?::\d{2,5})?\b",
+        "email": r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-zA-Z]{2,}",
+        "national_id": r"(?<!\d)(?:\d{12}|\d{9})(?!\d)",
+        "phone_vn": r"(?<!\d)(?:\+84|0)(?:[\s.-]?\d){9,10}(?!\d)",
     }
 
     for name, pattern in PII_PATTERNS.items():
-        matches = re.findall(pattern, response, re.IGNORECASE)
+        matches = re.findall(pattern, redacted, re.IGNORECASE)
         if matches:
             issues.append(f"{name}: {len(matches)} found")
             redacted = re.sub(pattern, "[REDACTED]", redacted, flags=re.IGNORECASE)
@@ -172,16 +173,30 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        # 1. Deterministic redaction of PII / secrets
+        result = content_filter(response_text)
+        if not result["safe"]:
+            self.redacted_count += 1
+            response_text = result["redacted"]
+            llm_response.content = types.Content(
+                role="model",
+                parts=[types.Part.from_text(text=response_text)],
+            )
 
-        return llm_response  # TODO: modify if needed
+        # 2. Optional LLM-as-Judge
+        if self.use_llm_judge:
+            verdict = await llm_safety_check(response_text)
+            if not verdict["safe"]:
+                self.blocked_count += 1
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(
+                        text="[OUTPUT_BLOCKED:judge] I'm sorry, I can't share that "
+                             "information. Please contact VinBank support."
+                    )],
+                )
+
+        return llm_response
 
 
 # ============================================================
